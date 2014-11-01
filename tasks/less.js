@@ -57,7 +57,7 @@ module.exports = function(grunt) {
         return nextFileObj();
       }
 
-      var compiledMax = [], compiledMin = [];
+      var compiled = [];
       var i = 0;
 
       async.concatSeries(files, function(file, next) {
@@ -65,28 +65,23 @@ module.exports = function(grunt) {
           options.banner = '';
         }
 
-        compileLess(file, options, function(css, err) {
-          if (!err) {
-            if (css.max) {
-              compiledMax.push(css.max);
-            }
-            compiledMin.push(css.min);
+        compileLess(file, options)
+          .then(function(output) {
+            compiled.push(output.css);
+            grunt.file.write(options.sourceMapFilename, output.map);
+            grunt.log.writeln('File ' + chalk.cyan(options.sourceMapFilename) + ' created.');
             process.nextTick(next);
-          } else {
+          },
+          function(err) {
             nextFileObj(err);
-          }
-        }, function (sourceMapContent) {
-          grunt.file.write(options.sourceMapFilename, sourceMapContent);
-          grunt.log.writeln('File ' + chalk.cyan(options.sourceMapFilename) + ' created.');
-        });
+          });
       }, function() {
-        if (compiledMin.length < 1) {
+        if (compiled.length < 1) {
           grunt.log.warn('Destination ' + chalk.cyan(destFile) + ' not written because compiled files were empty.');
         } else {
-          var max = compiledMax.join(grunt.util.normalizelf(grunt.util.linefeed));
-          var min = compiledMin.join(options.cleancss ? '' : grunt.util.normalizelf(grunt.util.linefeed));
-          grunt.file.write(destFile, min);
-          grunt.log.writeln('File ' + chalk.cyan(destFile) + ' created: ' + maxmin(max, min, options.report === 'gzip'));
+          var allCss = compiled.join(options.compress ? '' : grunt.util.normalizelf(grunt.util.linefeed));
+          grunt.file.write(destFile, allCss);
+          grunt.log.writeln('File ' + chalk.cyan(destFile) + ' created: ' + maxmin(allCss, allCss, options.report === 'gzip'));
         }
         nextFileObj();
       });
@@ -94,7 +89,7 @@ module.exports = function(grunt) {
     }, done);
   });
 
-  var compileLess = function(srcFile, options, callback, sourceMapCallback) {
+  var compileLess = function(srcFile, options, callback) {
     options = _.assign({filename: srcFile}, options);
     options.paths = options.paths || [path.dirname(srcFile)];
 
@@ -114,13 +109,7 @@ module.exports = function(grunt) {
       }
     }
 
-    var css;
     var srcCode = grunt.file.read(srcFile);
-
-    var parser = new less.Parser(_.pick(options, lessOptions.parse));
-    var additionalData = {
-      banner: options.banner
-    };
 
     // Equivalent to --modify-vars option.
     // Properties under options.modifyVars are appended as less variables
@@ -131,38 +120,22 @@ module.exports = function(grunt) {
       srcCode += modifyVarsOutput;
     }
 
-    parser.parse(srcCode, function(parse_err, tree) {
-      if (parse_err) {
-        lessError(parse_err, srcFile);
-        callback('',true);
-      }
-
-      // Load custom functions
-      if (options.customFunctions) {
-        Object.keys(options.customFunctions).forEach(function(name) {
-          less.tree.functions[name.toLowerCase()] = function() {
-            var args = [].slice.call(arguments);
-            args.unshift(less);
-            var res = options.customFunctions[name].apply(this, args);
-            return typeof res === "object" ? res : new less.tree.Anonymous(res);
-          };
+    // Load custom functions
+    if (options.customFunctions) {
+      Object.keys(options.customFunctions).forEach(function(name) {
+        less.functions.functionRegistry.add(name.toLowerCase(), function() {
+          var args = [].slice.call(arguments);
+          args.unshift(less);
+          var res = options.customFunctions[name].apply(this, args);
+          return typeof res === "object" ? res : new less.tree.Anonymous(res);
         });
-      }
+      });
+    }
 
-      var minifyOptions = _.pick(options, lessOptions.render);
-
-      if (minifyOptions.sourceMapFilename) {
-        minifyOptions.writeSourceMap = sourceMapCallback;
-      }
-
-      try {
-        css = minify(tree, minifyOptions);
-        callback(css, null);
-      } catch (e) {
-        lessError(e, srcFile);
-        callback(css, true);
-      }
-    }, additionalData);
+    return less.render(srcCode, options)
+      .catch(function(err) {
+        lessError(err, srcFile);
+      });
   };
 
   var parseVariableOptions = function(options) {
@@ -190,15 +163,5 @@ module.exports = function(grunt) {
     var err = new Error(message);
     err.origError = e;
     return err;
-  };
-
-  var minify = function (tree, options) {
-    var result = {
-      min: tree.toCSS(options)
-    };
-    if (!_.isEmpty(options)) {
-      result.max = tree.toCSS();
-    }
-    return result;
   };
 };
